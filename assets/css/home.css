@@ -6,6 +6,9 @@
         width: 100%;
         
     }
+    .button1{
+        visibility:hidden;
+    }
 }
 body {
     background-repeat: no-repeat;
