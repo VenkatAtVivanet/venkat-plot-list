@@ -7,7 +7,7 @@
         
     }
     .button1{
-        visibility:hidden;
+        display: none;
     }
 }
 body {
