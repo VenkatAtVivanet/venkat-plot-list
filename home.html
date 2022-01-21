@@ -1,34 +1,54 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+
 	<head>
 		<title>Plot List</title>
 		<link rel="icon" href="assets/images/Apartment.png" type="image/png">
 		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no">
+		
 		<link rel="stylesheet" href="assets/css/home.css">
-		<script src="assets/js/home.js"></script>
 	</head>
+
 	<body style="background-image: url('assets/images/banner-bg.jpg');">
-		<img style="padding-left:90px; padding-top:20px;" src="assets/images/white-logo.png" alt="Image of Plotlist">
-		<button class="button button1"><i class="fa fa-plus-circle" style="font-size:20px; margin-right:10px;"></i>Add Your Listing</button>
+		<div class="header">
+			<picture class="image1">
+				<source srcset="assets/images/black-logo.png" media="(max-width: 600px)" class="blacklogo">
+				<source srcset="assets/images/white-logo.png" media="(max-width: 1500px)">
+				<source srcset="assets/images/white-logo.png">
+				<img src="assets/images/white-logo.png" alt="Image of Plotlist"style="padding-left:90px; padding-top:20px;">
+			</picture>
+			<button class="button button1"><i class="fa fa-plus-circle" style="font-size:20px; margin-right:10px;"></i>Add Your Listing</button>
+		</div>
 		<hr>
 		<br><br><br><br><br><br><br><br><br>
-		<center>
-			<h5>OVER 36500+ ACTIVE LISTINGS</h5>
-			<h1>Find Nearby Places & Things</h1>
-		</center>
-		<div class="Positioning">
-			<select class="select select1" id="slct1" name="slct1" onchange="populate(this.id,'slct2')">
-				<option value="All Areas">All Areas</option>
-				<option value="Hyderabad">Hyderabad</option>
-				<option value="Pune">Pune</option>
-				<option value="Mumbai">Mumbai</option>
-			</select>
-			<select class="select select2" id="slct2" name="slct2">
-				<option value="">All Localities</option>
-			</select>
-			<button class="button button2"><i class="fa fa-search" style="font-size:18px; margin-right:10px;"></i>Search Now</button>
+		<div class="row">
+			<div class="col-12">
+				<div class="middle">
+					<center>
+						<h5>OVER 36500+ ACTIVE LISTINGS</h5>
+						<h1>Find Nearby Places & Things</h1>
+						<span>
+							<div class="bgcolor">
+								<form id="search-form" name="sf" method="submit" role="search" action="#">
+									<select class="select select1" id="slct1" name="slct1" onchange="populate(this.id,'slct2')">
+										<option value="All Areas">All Areas</option>
+										<option value="Hyderabad">Hyderabad</option>
+										<option value="Pune">Pune</option>
+										<option value="Mumbai">Mumbai</option>
+									</select>
+									<select class="select select2" id="slct2" name="slct2">
+										<option value="">All Localities</option>
+									</select>
+									<button class="button button2"><i class="fa fa-search" style="font-size:18px; margin-right:10px;"></i>Search Now</button>
+								</form>
+							</div>
+						</span>
+					</center>
+				</div>
+			</div>
 		</div>
+		<script src="assets/js/home.js"></script>
 	</body>
 </html>
