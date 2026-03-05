@@ -1,13 +1,8 @@
-# KT: Router + Service Layer (Support, Medical, Karnataka Engineering)
+# KT: Endpoint Sequence Flows (Router -> Service -> Repository)
 
 Last updated: 2026-03-05
 
-## Purpose
-- This KT covers both:
-- Router layer (request validation, auth, response shaping)
-- Service layer (business logic, DB calls, recommendation logic, storage/email/payment integrations)
-
-Files in scope:
+## Scope
 - `future_bridge/api/v1/supportRouters.py`
 - `future_bridge/api/v1/medicalRouters.py`
 - `future_bridge/api/v1/karnatakaEngineeringRouters.py`
@@ -15,337 +10,209 @@ Files in scope:
 - `future_bridge/services/medicalService.py`
 - `future_bridge/services/karnatakaEngineeringService.py`
 
-## Architecture Summary
-- Routers:
-- Enforce `Depends(jwtBearer())`
-- Extract token via `get_token_from_header(request)`
-- Validate token via `validate_google_token(...)`
-- Perform request-level validations and normalization
-- Delegate to service layer
-- Wrap output in response schemas
-
-- Services:
-- Convert request schema to domain model when needed
-- Execute business rules
-- Call repositories for DB read/write
-- Integrate with Azure Blob, email, and payment config/status
-
-- Repositories:
-- Persist and query data (Mongo/DB collections)
-- Provide filtered/sorted/paginated fetches and recommendation source data
-
----
-
-## Common Auth and Error Handling Notes
-- All listed routes are JWT protected using `Depends(jwtBearer())`.
-- Token validation shape is not fully consistent in router usage:
-- Some handlers use `is_valid, email = validate_google_token(token)`
-- Some handlers treat return as boolean or index tuple directly
-- KT recommendation: standardize utility contract to always return `(is_valid, email_or_none)`.
-
-- Typical router errors:
-- `401` for invalid/expired token
-- `422` for payload validation mismatches
-- `400` for normalization failures (example: Maharashtra college code must be numeric)
-- `500` for unhandled failures (with logging)
-
----
-
-## Support Module KT
-
-### Router responsibilities (`supportRouters.py`)
-- `/raise_issues`:
-- Validates token
-- Parses user-agent to browser/os/device metadata
-- Validates max 2 attachments, extension whitelist, per-file size limit 100 MB
-- Uploads files through service, then stores ticket
-
-- `/tickets`:
-- Validates `page >= 1`, `10 <= limit <= 100`
-- Delegates filtered list retrieval
-
-- `/tickets/username`, `/tickets/{ticket_id}`:
-- Delegates user-specific or id-specific ticket lookup
-
-- `/tickets-export`:
-- Delegates CSV generation and returns `StreamingResponse`
-
-- `/tickets/bulk-action`, `/metrics`:
-- Delegates bulk state changes and dashboard metrics fetch
-
-- `/tickets/{ticket_id}/comments`:
-- Validates token
-- Delegates comment creation + attachment handling + notifications
-
-### Service responsibilities (`supportService.py`)
-- `upload_to_blob(filename, data)`:
-- Creates unique blob name (UUID + original extension)
-- Uploads to Azure Blob container using `BlobServiceClient` from connection string
-- Returns blob URL
-
-- `store_user_tickets(support_request, browser_info, files)`:
-- Builds `Support` model from payload + browser info + attachments
-- Stores via repository
-- Sends ticket copy email to end user and CC support if insert succeeded
-
-- `send_ticket_copy(ticket_data)`:
-- Formats created timestamp in IST
-- Sends HTML email via `MicrosoftEmailService().process_request(...)`
-
-- `export_tickets_as_csv(status, ticket_ids)`:
-- Pulls export rows from repository
-- Writes CSV in-memory (`io.StringIO`)
-- Returns stream for router response
-
-- `upload_attachments(files)`:
-- Validates allowed extensions
-- Validates total combined attachment size <= 100 MB
-- Uploads each file and returns blob URL list
-
-- `add_comment_to_ticket(ticket_id, payload, files)`:
-- Verifies ticket exists
-- Uploads attachments
-- Builds `Comments` model and appends via repository
-- Sends email notification on successful update
-
-- `send_comment_notification(...)`:
-- Sends HTML email to ticket owner + support CC
-
-- Pass-through service methods:
-- `get_all_tickets`, `get_ticket_by_id`, `get_tickets_by_username`
-- `perform_bulk_action`
-- `get_support_metrics`
-- `get_tickets_for_export`
-
-### Integrations
-- Azure Blob Storage: attachment uploads
-- Microsoft email service: ticket copy + comment notifications
-- Support repository: ticket CRUD/filter/export/metrics
-
----
-
-## Medical Module KT
-
-### Router responsibilities (`medicalRouters.py`)
-- `/student/configuration`:
-- Validates token and enforces token email == payload username
-- Delegates store/update
-- Returns `201` when operation is `created`, else `200`
-
-- `/student/details`:
-- Uses token email + state to fetch saved configuration
-
-- `/medical/recommendations`:
-- Validates token
-- Normalizes `last_round_college_choice_code` via `normalize_college_code(...)` when provided
-- Delegates recommendation generation
-
-- `/medical/recommendations/college-list`:
-- Fetches stored recommendation groups by email + round + state
-
-- `/college/search/name` and `/college/search/code`:
-- Delegates search; code endpoint normalizes code by state
-
-- `normalize_college_code(...)`:
-- `State.MAHARASHTRA`: code must be numeric, returns `int`, else HTTP 400
-- `State.KARNATAKA`: uppercase string
-- Others: uppercase string
-
-- `/store_medical_college_details`:
-- Validates required fields
-- Normalizes `collegeCode`
-- Delegates persistence
-
-- `/get_medical_user_round_details`:
-- Delegates retrieval by token email + round + state
-
-### Service responsibilities (`medicalService.py`)
-- `generate_medical_configuration(request_data)`:
-- Builds `MedicalConfiguration` model
-- Stores via repository
-
-- `retrieve_medical_configuration(email, state)`:
-- Fetches latest/saved config
-
-- `generate_medical_recommendations(request_data)`:
-- Reads round, optional last-round choice, and user config
-- Extracts category, gender, rank, preferred programs/cities/state/college types
-- Optionally computes previous-round threshold (`search_highestAIR`) for rounds >1
-- Fetches relevant cutoff rows using repository filters
-- Resolves payment flags:
-- `is_payment` from medical repository
-- `accept_payment` from payment repository config
-- For each candidate row:
-- Selects best matching cutoff (state-specific)
-- Karnataka uses category-only cutoff match
-- Other states use category + gender cutoff match
-- Computes admission probability from rank-to-cutoff ratio (14-bucket model: 99..10)
-- Builds probability message and recommendation item
-- Deduplicates by `(college_code, program)` keeping stronger probability/cutoff
-- Applies last-round filter if `highest_air_value` exists
-- Buckets results into `Dream/Reach/Match/Safety`
-- Applies overflow limits from settings:
-- `MEDICAL_DREAM_LIMIT`, `MEDICAL_REACH_LIMIT`, `MEDICAL_MATCH_LIMIT`, `MEDICAL_SAFETY_LIMIT`
-- Stores grouped recommendation payload
-- Returns grouped response
-
-- `_empty_response(...)`:
-- Returns/stores empty recommendation skeleton with payment flags
-
-- `get_medical_college_recommendation_list_round(email, round, state)`:
-- Returns stored grouped recommendations
-- If none found, returns empty valid structure (prevents schema failures)
-- Refreshes payment flags
-
-- Search and round-details methods:
-- `search_college_by_college_name`
-- `search_college_by_college_code`
-- `store_medical_college_details` (maps request to `MedicalCollegeDetails`)
-- `get_medical_user_round_details`
-
-### Integrations
-- Medical repository: configuration, cutoff retrieval, recommendations, round details
-- Payment repository: payment success/config flags for response gating
-
----
-
-## Karnataka Engineering Module KT
-
-### Router responsibilities (`karnatakaEngineeringRouters.py`)
-- `/store-engineering-user-config/`:
-- Validates token
-- Enforces token email == payload username
-- Delegates config upsert
-- Sets dynamic status `201` or `200` based on operation
-
-- `/fetch-engineering-user-config`:
-- Fetches saved config by token email
-- Returns successful empty-data response when not found
-
-- `/recommendation/college-list` `POST`:
-- Validates token
-- Delegates recommendation generation and returns grouped output
-
-- `/recommendation/college-list` `GET`:
-- Fetches stored grouped recommendations by token email + round
-
-- `/store_engineering_round_college_details`:
-- Validates token
-- Enforces required payload fields
-- Delegates store
-
-- `/get_engineering_round_college_details`:
-- Delegates retrieval by token email + selected round
-
-- `/search_college_by/college_name` and `/search_college_by/college_code`:
-- Validates token and delegates search
-
-### Service responsibilities (`karnatakaEngineeringService.py`)
-- `store_engineering_user_config(payload)`:
-- Persists user config via repository
-
-- `retrieve_engineering_user_config(email)`:
-- Fetches user config
-
-- `resolve_branches_by_group(branch_groups)`:
-- Expands enum branch groups using `ENGINEERING_BRANCH_GROUP_MAP`
-- De-duplicates resulting branches
-
-- `generate_college_recommendations(payload, email)`:
-- Extracts category, CET rank, selected branch groups, cities, gender, round
-- Expands branch groups to concrete branches
-- Returns empty grouped structure if mandatory inputs missing
-- For rounds >1 with last-round selected college+course, fetches previous-year round cutoff
-- Retrieves cutoff dataset filtered by category/round/course/cities/gender and previous-round condition
-- Resolves payment flags:
-- `is_payment` from engineering repository
-- `accept_payment` from payment repository config
-- Builds recommendation entries with:
-- college/course metadata
-- user rank and category
-- cutoff
-- probability score + message
-- Groups by probability:
-- Dream: 10-49
-- Reach: 50-74
-- Match: 75-89
-- Safety: >=90
-- Applies overflow limits from settings:
-- `ENGINEERING_DREAM_LIMIT`, `ENGINEERING_REACH_LIMIT`, `ENGINEERING_MATCH_LIMIT`, `ENGINEERING_SAFETY_LIMIT`
-- Persists grouped result per round
-- Returns grouped response
-
-- `_calculate_probability(last_year_cutoff, cet_rank)`:
-- Ratio-based score model (99..10) + message text
-
-- `get_college_recommendation_list(email, round)`:
-- Fetches stored grouped recommendations
-- If found, updates payment flags before returning
-- If not found, returns empty grouped structure
-
-- Round detail and search methods:
-- `store_engineering_round_college_details`
-- `get_engineering_round_college_details`
-- `search_college_by_college_name`
-- `search_college_by_college_code`
-
-### Integrations
-- Karnataka engineering repository: config, cutoff retrieval, recommendations, round details, searches
-- Payment repository: payment flags
-
----
-
-## Router-to-Service Method Map
-
-Support:
-- `POST /raise_issues` -> `upload_to_blob` (per file), `store_user_tickets`
-- `GET /tickets` -> `get_all_tickets`
-- `GET /tickets/username` -> `get_tickets_by_username`
-- `GET /tickets/{ticket_id}` -> `get_ticket_by_id`
-- `POST /tickets-export` -> `export_tickets_as_csv`
-- `PATCH /tickets/bulk-action` -> `perform_bulk_action`
-- `GET /metrics` -> `get_support_metrics`
-- `POST /tickets/{ticket_id}/comments` -> `add_comment_to_ticket`
-
-Medical:
-- `POST /student/configuration` -> `generate_medical_configuration`
-- `GET /student/details` -> `retrieve_medical_configuration`
-- `POST /medical/recommendations` -> `generate_medical_recommendations`
-- `GET /medical/recommendations/college-list` -> `get_medical_college_recommendation_list_round`
-- `GET /college/search/name` -> `search_college_by_college_name`
-- `GET /college/search/code` -> `search_college_by_college_code`
-- `POST /store_medical_college_details` -> `store_medical_college_details`
-- `GET /get_medical_user_round_details` -> `get_medical_user_round_details`
-
-Karnataka Engineering:
-- `POST /store-engineering-user-config/` -> `store_engineering_user_config`
-- `GET /fetch-engineering-user-config` -> `retrieve_engineering_user_config`
-- `POST /recommendation/college-list` -> `generate_college_recommendations`
-- `GET /recommendation/college-list` -> `get_college_recommendation_list`
-- `POST /store_engineering_round_college_details` -> `store_engineering_round_college_details`
-- `GET /get_engineering_round_college_details` -> `get_engineering_round_college_details`
-- `POST /search_college_by/college_name` -> `search_college_by_college_name`
-- `POST /search_college_by/college_code` -> `search_college_by_college_code`
-
----
-
-## Handover Checklist (Service-Aware)
-- Confirm env vars/secrets:
-- DB URIs, DB names, collection names
-- Azure blob connection string and container
-- Email provider settings for `MicrosoftEmailService`
-- Google JWT validation settings/client IDs
-
-- Confirm recommendation settings in config:
-- Medical and engineering Dream/Reach/Match/Safety limits
-- Any state/category cutoff source assumptions in repositories
-
-- Verify token validator contract consistency across routers and utils:
-- `future_bridge.utils.google.token_validator`
-- `future_bridge.utils.google.token_validation`
-
-- Run API smoke tests for:
-- Auth failure paths (401)
-- Validation paths (422/400)
-- Empty recommendation read paths
-- File upload + comment notification path (support)
+## Global Pattern
+- All endpoints in this file are JWT-protected using `Depends(jwtBearer())`.
+- Standard flow shape: `Request -> Router checks -> Service methods -> Repository -> Response`.
+
+## Support Endpoints
+
+1. `POST /raise_issues`
+- Request: `SupportRequest` form payload + optional files.
+- Router checks: token extraction and validation, user-agent parsing, max 2 files, extension whitelist, per-file size <= 100 MB.
+- Service methods: `upload_to_blob` (per file, Azure Blob) -> `store_user_tickets` -> `send_ticket_copy` (email on success).
+- Business logic: constructs `Support` model with browser metadata and attachment URLs; sends ticket copy only if insert succeeded.
+- Repository: `SupportRepository.store_user_tickets`.
+- Response: `SupportResponse` success payload; validation failure `422`; unexpected error `500`.
+
+2. `GET /tickets`
+- Request: query filters (`status`, `sort`, `page`, `limit`, `include_deleted`).
+- Router checks: `page >= 1`, `10 <= limit <= 100`.
+- Service methods: `get_all_tickets`.
+- Business logic: server-side filtered/sorted/paginated list retrieval via route filter object.
+- Repository: `SupportRepository.get_all_tickets`.
+- Response: paginated `SupportResponse`; validation failure `422`; unexpected error `500`.
+
+3. `GET /tickets/username`
+- Request: query `username`.
+- Router checks: token extraction and validation.
+- Service methods: `get_tickets_by_username`.
+- Business logic: returns user-scoped tickets and response metadata (`total_tickets`).
+- Repository: `SupportRepository.get_tickets_by_username`.
+- Response: `SupportResponse` with `total_tickets` and `tickets`; auth failure path; unexpected error `500`.
+
+4. `GET /tickets/{ticket_id}`
+- Request: path `ticket_id`.
+- Router checks: none beyond route auth dependency.
+- Service methods: `get_ticket_by_id`.
+- Business logic: existence check at router layer before success response.
+- Repository: `SupportRepository.get_ticket_by_id`.
+- Response: `SupportResponse`; `404` when not found; unexpected error `500`.
+
+5. `POST /tickets-export`
+- Request: `ExportTicketsRequest` (`status`, `ticket_ids`).
+- Router checks: payload/schema validation.
+- Service methods: `export_tickets_as_csv` (builds in-memory CSV stream).
+- Business logic: fetches export dataset, writes CSV header + rows, returns stream pointer.
+- Repository: `SupportRepository.get_tickets_for_export`.
+- Response: `StreamingResponse(text/csv)` file download; `404` if no rows; unexpected error `500`.
+
+6. `PATCH /tickets/bulk-action`
+- Request: `BulkActionRequest` (`action`, `ticket_ids`).
+- Router checks: payload/schema validation.
+- Service methods: `perform_bulk_action`.
+- Business logic: applies single action over multiple ticket IDs in one operation.
+- Repository: `SupportRepository.perform_bulk_action`.
+- Response: `SupportResponse` with bulk update result; unexpected error `500`.
+
+7. `GET /metrics`
+- Request: none.
+- Router checks: none beyond route auth dependency.
+- Service methods: `get_support_metrics`.
+- Business logic: returns dashboard aggregates (open/closed/paid/total style metrics).
+- Repository: `SupportRepository.get_support_metrics`.
+- Response: `SupportResponse` with dashboard metrics; unexpected error `500`.
+
+8. `POST /tickets/{ticket_id}/comments`
+- Request: path `ticket_id` + `CommentRequest` form payload + optional files.
+- Router checks: token extraction and validation.
+- Service methods: `add_comment_to_ticket` -> `upload_attachments` -> `upload_to_blob` (Azure Blob) -> `send_comment_notification` (email on success).
+- Business logic: verifies ticket exists, enforces attachment extension/combined-size checks, appends `Comments` model, notifies ticket owner/support.
+- Repository: `SupportRepository.get_ticket_by_id` -> `SupportRepository.add_comment_to_ticket`.
+- Response: `SupportResponse`; `404` if ticket missing; validation failure `422`; unexpected error `500`.
+
+## Medical Endpoints
+
+1. `POST /student/configuration`
+- Request: `MedicalConfigurationRequest`.
+- Router checks: token extraction and validation, token email must match payload `username`.
+- Service methods: `generate_medical_configuration`.
+- Business logic: maps request to `MedicalConfiguration` domain model and upserts configuration.
+- Repository: `MedicalRepository.store_medical_configuration`.
+- Response: `MedicalConfigurationResponse`; status `201` (created) or `200` (updated); auth failure `401`; validation failure `422`; unexpected error `500`.
+
+2. `GET /student/details`
+- Request: query `state`.
+- Router checks: token extraction and validation.
+- Service methods: `retrieve_medical_configuration`.
+- Business logic: fetches latest/saved config by authenticated email + state.
+- Repository: `MedicalRepository.retrieve_medical_configuration`.
+- Response: `MedicalConfigurationResponse`; auth failure `401`; validation failure `422`; unexpected error `500`.
+
+3. `POST /medical/recommendations`
+- Request: `MedicalCollegeRoundPreferencesRequest`.
+- Router checks: token extraction and validation, normalize `last_round_college_choice_code` using `normalize_college_code` when present.
+- Service methods: `generate_medical_recommendations` -> optional previous-round threshold lookup -> probability grouping -> overflow-limit application -> recommendation persistence.
+- Business logic: state-aware cutoff selection (Karnataka category-only vs others category+gender), 14-bucket probability scoring, dedupe by `(college_code, program)`, optional highest-AIR filter for rounds >1, Dream/Reach/Match/Safety grouping with configured limits and payment flags.
+- Repository: `MedicalRepository.search_highestAIR` (conditional) -> `MedicalRepository.fetch_cutoff_data` -> `MedicalRepository.is_user_payment_valid` -> `PaymentRepository.get_accept_payment_from_config` -> `MedicalRepository.store_medical_recommendation`.
+- Response: `MedicalCollegeRecommendationsResponse`; validation failure `422`; unexpected error `500`.
+
+4. `GET /medical/recommendations/college-list`
+- Request: query `round`, `state`.
+- Router checks: token extraction and validation.
+- Service methods: `get_medical_college_recommendation_list_round` (returns stored or empty grouped structure, refreshes payment flags).
+- Business logic: enforces schema-safe empty payload when recommendation record is missing.
+- Repository: `MedicalRepository.is_user_payment_valid` -> `PaymentRepository.get_accept_payment_from_config` -> `MedicalRepository.get_medical_college_recommendation_list_round`.
+- Response: `MedicalCollegeRecommendationsListResponse`; auth failure `401`; unexpected error `500`.
+
+5. `GET /college/search/name`
+- Request: query `college_name`, `state`.
+- Router checks: token extraction and validation.
+- Service methods: `search_college_by_college_name`.
+- Business logic: performs state-scoped fuzzy/name search pass-through.
+- Repository: `MedicalRepository.search_college_by_college_name`.
+- Response: `dict` message/success/data payload; auth failure `401`; unexpected error `500`.
+
+6. `GET /college/search/code`
+- Request: query `college_code`, `state`.
+- Router checks: token extraction and validation, normalize code by state (`MAHARASHTRA` numeric else uppercase string).
+- Service methods: `search_college_by_college_code`.
+- Business logic: enforces Maharashtra integer code contract before repository lookup.
+- Repository: `MedicalRepository.search_college_by_college_code`.
+- Response: `dict` message/success/data payload; auth failure `401`; normalization failure `400`; unexpected error `500`.
+
+7. `POST /store_medical_college_details`
+- Request: `MedicalCollegeDetailsRequest`.
+- Router checks: token extraction and validation, required field checks, normalize `collegeCode`.
+- Service methods: `store_medical_college_details`.
+- Business logic: maps request to `MedicalCollegeDetails` and binds authenticated email (`userName`) before save.
+- Repository: `MedicalRepository.store_medical_college_details`.
+- Response: `MedicalConfigurationResponse`; validation failure `422`; unexpected error `500`.
+
+8. `GET /get_medical_user_round_details`
+- Request: query `round`, `state`.
+- Router checks: token extraction and validation.
+- Service methods: `get_medical_user_round_details`.
+- Business logic: retrieves user-selected round college details for authenticated user and state.
+- Repository: `MedicalRepository.get_medical_user_round_details`.
+- Response: `MedicalConfigurationResponse`; validation failure `422`; unexpected error `500`.
+
+## Karnataka Engineering Endpoints
+
+1. `POST /store-engineering-user-config/`
+- Request: `EngineeringUserConfigRequest`.
+- Router checks: token extraction and validation, token email must match payload `username`.
+- Service methods: `store_engineering_user_config`.
+- Business logic: persists/upserts engineering config and returns operation-based HTTP status.
+- Repository: `KarnatakaEngineeringRepository.store_engineering_user_config`.
+- Response: success payload; status `201` (created) or `200` (updated); auth failure `401`; validation failure `422`; unexpected error `500`.
+
+2. `GET /fetch-engineering-user-config`
+- Request: none.
+- Router checks: token extraction and validation.
+- Service methods: `retrieve_engineering_user_config`.
+- Business logic: fetches latest config for authenticated user and returns success with `data=null` when absent.
+- Repository: `KarnatakaEngineeringRepository.retrieve_engineering_user_config`.
+- Response: `EngineeringUserConfigResponse`; auth failure `401`; unexpected error `500`.
+
+3. `POST /recommendation/college-list`
+- Request: `CollegeRecommendationRequest`.
+- Router checks: token extraction and validation.
+- Service methods: `generate_college_recommendations` -> `resolve_branches_by_group` -> optional previous-round cutoff lookup -> probability grouping -> overflow-limit application -> recommendation persistence.
+- Business logic: expands branch groups, short-circuits to empty groups for missing mandatory inputs, applies ratio-based probability scoring, groups into Dream/Reach/Match/Safety using configured limits, persists round-wise output with payment flags.
+- Repository: `KarnatakaEngineeringRepository.get_previous_year_round_cutoff` (conditional) -> `KarnatakaEngineeringRepository.get_cutoff_by_category_course_cities` -> `KarnatakaEngineeringRepository.is_user_payment_valid` -> `PaymentRepository.get_accept_payment_from_config` -> `KarnatakaEngineeringRepository.store_college_recommendations`.
+- Response: `CollegeRecommendationListResponse` grouped as Dream/Reach/Match/Safety; auth failure `401`; unexpected error `500`.
+
+4. `GET /recommendation/college-list`
+- Request: query `round`.
+- Router checks: token extraction and validation.
+- Service methods: `get_college_recommendation_list` (returns stored or empty grouped structure, updates payment flags).
+- Business logic: if stored response exists, mutates payment flags before return; otherwise returns empty grouped skeleton for selected round.
+- Repository: `PaymentRepository.is_user_payment_successful` -> `PaymentRepository.get_accept_payment_from_config` -> `KarnatakaEngineeringRepository.get_college_recommendations_by_email`.
+- Response: `CollegeRecommendationListResponse`; auth failure `401`; unexpected error `500`.
+
+5. `POST /store_engineering_round_college_details`
+- Request: `CollegeDetails`.
+- Router checks: token extraction and validation, required field checks (`college_code`, `college_name`, `course_name`, `round`, `city`, `category`, `cet_rank`).
+- Service methods: `store_engineering_round_college_details`.
+- Business logic: maps payload to domain model and stores user-selected round college record.
+- Repository: `KarnatakaEngineeringRepository.store_engineering_round_college_details`.
+- Response: `RoundCollegeDetailsResponse`; validation failure `422`; unexpected error `500`.
+
+6. `GET /get_engineering_round_college_details`
+- Request: query `round`.
+- Router checks: token extraction and validation.
+- Service methods: `get_engineering_round_college_details`.
+- Business logic: returns selected college details for authenticated user and selected round.
+- Repository: `KarnatakaEngineeringRepository.get_engineering_round_college_details`.
+- Response: `RoundCollegeDetailsResponse`; validation failure `422`; unexpected error `500`.
+
+7. `POST /search_college_by/college_name`
+- Request: query/body param `college_name`.
+- Router checks: token extraction and validation.
+- Service methods: `search_college_by_college_name`.
+- Business logic: performs name-based pass-through lookup across engineering college dataset.
+- Repository: `KarnatakaEngineeringRepository.search_college_by_college_name`.
+- Response: `dict` message/success/data payload; auth failure `401`; unexpected error `500`.
+
+8. `POST /search_college_by/college_code`
+- Request: query/body param `college_code`.
+- Router checks: token extraction and validation.
+- Service methods: `search_college_by_college_code`.
+- Business logic: performs code-based pass-through lookup for a specific engineering college.
+- Repository: `KarnatakaEngineeringRepository.search_college_by_college_code`.
+- Response: `dict` message/success/data payload; auth failure `401`; unexpected error `500`.
+
+## Notes for Handover
+- Token validator contract is inconsistent across files (`token_validator` vs `token_validation`; boolean vs tuple handling).
+- Recommendation responses in Medical and Engineering refresh payment flags at read time.
+- Support flows include Azure Blob storage and Microsoft email side effects on create/comment paths.
